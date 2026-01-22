@@ -1760,7 +1760,7 @@ function Build-CMakeProject {
           Add-FlagsDefine $Defines CMAKE_Swift_FLAGS_RELWITHDEBINFO "-O"
         }
 
-        $LinkerFlags = if ($UseGNUDriver) {
+        $LinkerFlags = if ($UseGNUDriver -or $UseSwift) {
           @("-Xlinker", "/INCREMENTAL:NO", "-Xlinker", "/OPT:REF", "-Xlinker", "/OPT:ICF")
         } else {
           @("/INCREMENTAL:NO", "/OPT:REF", "/OPT:ICF")
@@ -1775,7 +1775,7 @@ function Build-CMakeProject {
             Add-KeyValueIfNew $Defines CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded
             Add-KeyValueIfNew $Defines CMAKE_POLICY_DEFAULT_CMP0141 NEW
 
-            $LinkerFlags += if ($UseGNUDriver) {
+            $LinkerFlags += if ($UseGNUDriver -or $UseSwift) {
               @("-Xlinker", "/DEBUG")
             } else {
               @("/DEBUG")
@@ -1786,7 +1786,7 @@ function Build-CMakeProject {
             # `lld-link.exe` for linking.
             # TODO: Investigate supporting fission with PE/COFF, this should avoid this warning.
             if ($SwiftDebugFormat -eq "dwarf") {
-              if ($UseGNUDriver) {
+              if ($UseGNUDriver -or $UseSwift) {
                 $LinkerFlags += @("-Xlinker", "/IGNORE:longsections")
               } elseif (-not $UseMSVCCompilers.Contains("C") -and -not $UseMSVCCompilers.Contains("CXX")) {
                 $LinkerFlags += @("/IGNORE:longsections")
@@ -1797,6 +1797,8 @@ function Build-CMakeProject {
 
         Add-FlagsDefine $Defines CMAKE_EXE_LINKER_FLAGS $LinkerFlags
         Add-FlagsDefine $Defines CMAKE_SHARED_LINKER_FLAGS $LinkerFlags
+        Add-FlagsDefine $Defines CMAKE_EXE_LINKER_FLAGS_RELEASE $LinkerFlags
+        Add-FlagsDefine $Defines CMAKE_SHARED_LINKER_FLAGS_RELEASE $LinkerFlags
       }
 
       Android {
