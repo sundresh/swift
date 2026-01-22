@@ -39,8 +39,30 @@
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/TargetParser/Host.h"
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <random>
 #include <system_error>
 using namespace swift;
+
+static std::string getFormattedTimestamp() {
+  auto now = std::chrono::system_clock::now();
+  auto timeT = std::chrono::system_clock::to_time_t(now);
+  auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+      now.time_since_epoch()) % 1000000;
+  std::tm tm;
+#ifdef _WIN32
+  localtime_s(&tm, &timeT);
+#else
+  localtime_r(&timeT, &tm);
+#endif
+  char buf[64];
+  snprintf(buf, sizeof(buf), "[%04d-%02d-%02d %02d:%02d:%02d.%06lld]",
+      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+      tm.tm_hour, tm.tm_min, tm.tm_sec, (long long)us.count());
+  return std::string(buf);
+}
 
 //===----------------------------------------------------------------------===//
 // MARK: ImportResolver and supporting types
@@ -374,8 +396,37 @@ void ImportResolver::visitImportDecl(ImportDecl *ID) {
 }
 
 void ImportResolver::bindPendingImports() {
-  while(!unboundImports.empty())
-    bindImport(unboundImports.pop_back_val());
+  llvm::errs() << getFormattedTimestamp() << " bindPendingImports unboundImports: [";
+  for (size_t i = 0; i < unboundImports.size(); ++i) {
+    if (i > 0) llvm::errs() << ", ";
+    unboundImports[i].import.module.getModulePath().print(llvm::errs());
+  }
+  llvm::errs() << "]\n";
+
+  const char *randomizeEnv = std::getenv("RANDOMIZE_BIND_PENDING_IMPORTS_ORDER");
+  bool shouldRandomize = randomizeEnv && randomizeEnv[0] != '\0';
+
+  std::default_random_engine gen(
+      std::chrono::system_clock::now().time_since_epoch().count());
+
+  while(!unboundImports.empty()) {
+    if (shouldRandomize) {
+      std::uniform_int_distribution<size_t> dist(0, unboundImports.size() - 1);
+      size_t idx = dist(gen);
+      UnboundImport import = std::move(unboundImports[idx]);
+      unboundImports.erase(unboundImports.begin() + idx);
+      bindImport(std::move(import));
+    } else {
+      bindImport(unboundImports.pop_back_val());
+    }
+
+    llvm::errs() << getFormattedTimestamp() << " bindPendingImports unboundImports: [";
+    for (size_t i = 0; i < unboundImports.size(); ++i) {
+      if (i > 0) llvm::errs() << ", ";
+      unboundImports[i].import.module.getModulePath().print(llvm::errs());
+    }
+    llvm::errs() << "]\n";
+  }
 }
 
 void ImportResolver::bindImport(UnboundImport &&I) {

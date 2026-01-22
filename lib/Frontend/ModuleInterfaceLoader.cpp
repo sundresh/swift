@@ -54,9 +54,28 @@
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/xxhash.h"
+#include <chrono>
 
 using namespace swift;
 using FileDependency = SerializationOptions::FileDependency;
+
+static std::string getFormattedTimestamp() {
+  auto now = std::chrono::system_clock::now();
+  auto timeT = std::chrono::system_clock::to_time_t(now);
+  auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+      now.time_since_epoch()) % 1000000;
+  std::tm tm;
+#ifdef _WIN32
+  localtime_s(&tm, &timeT);
+#else
+  localtime_r(&timeT, &tm);
+#endif
+  char buf[64];
+  snprintf(buf, sizeof(buf), "[%04d-%02d-%02d %02d:%02d:%02d.%06lld]",
+      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+      tm.tm_hour, tm.tm_min, tm.tm_sec, (long long)us.count());
+  return std::string(buf);
+}
 
 #pragma mark - Forwarding Modules
 
@@ -1218,9 +1237,11 @@ class ModuleInterfaceLoaderImpl {
       // about the state of the world.
       if (rebuildInfo.sawOutOfDateModule(modulePath))
         builder.addExtraDependency(modulePath);
+      llvm::errs() << getFormattedTimestamp() << " findOrBuildLoadableModule [1] before buildSwiftModule\n";
       failed = builder.buildSwiftModule(cachedOutputPath,
                                         /*shouldSerializeDeps*/true,
                                         &moduleBuffer, remarkRebuild);
+      llvm::errs() << getFormattedTimestamp() << " findOrBuildLoadableModule [1] after buildSwiftModule\n";
     }
     if (!failed) {
       // If succeeded, we are done.
@@ -1256,10 +1277,12 @@ class ModuleInterfaceLoaderImpl {
       // Use cachedOutputPath as the output file path. This output path was
       // calculated using the canonical interface file path to make sure we
       // can find it from the canonical interface file.
+      llvm::errs() << getFormattedTimestamp() << " findOrBuildLoadableModule [2] before buildSwiftModule\n";
       auto failedAgain = fallbackBuilder.buildSwiftModule(cachedOutputPath,
                                                           /*shouldSerializeDeps*/true,
                                                           &moduleBuffer,
                                                           remarkRebuild);
+      llvm::errs() << getFormattedTimestamp() << " findOrBuildLoadableModule [2] after buildSwiftModule\n";
       if (failedAgain)
         return std::make_error_code(std::errc::invalid_argument);
       assert(moduleBuffer);
@@ -1364,7 +1387,7 @@ std::error_code ModuleInterfaceLoader::findModuleFilesInDirectory(
 
   // Ask the impl to find us a module that we can load or give us an error
   // telling us that we couldn't load it.
-  auto ModuleBufferOrErr = Impl.findOrBuildLoadableModule();
+  auto ModuleBufferOrErr = Impl.findOrBuildLoadableModule();  // 80-90% of the time spent in findModuleFilesInDirectory() is in findOrBuildLoadableModule()
   if (!ModuleBufferOrErr)
     return ModuleBufferOrErr.getError();
 
@@ -1499,9 +1522,11 @@ bool ModuleInterfaceLoader::buildSwiftModuleFromSwiftInterface(
                                          silenceInterfaceDiagnostics);
   // FIXME: We really only want to serialize 'important' dependencies here, if
   //        we want to ship the built swiftmodules to another machine.
+  llvm::errs() << getFormattedTimestamp() << " buildSwiftModuleFromSwiftInterface [3] before buildSwiftModule\n";
   auto failed = builder.buildSwiftModule(OutPath, /*shouldSerializeDeps*/true,
                                          /*ModuleBuffer*/nullptr, nullptr,
                                          SearchPathOpts.CandidateCompiledModules);
+  llvm::errs() << getFormattedTimestamp() << " buildSwiftModuleFromSwiftInterface [3] after buildSwiftModule\n";
   if (!failed)
     return false;
   auto backInPath =
@@ -1522,9 +1547,12 @@ bool ModuleInterfaceLoader::buildSwiftModuleFromSwiftInterface(
   backupBuilder.addExtraDependency(InPath);
   // FIXME: We really only want to serialize 'important' dependencies here, if
   //        we want to ship the built swiftmodules to another machine.
-  return backupBuilder.buildSwiftModule(OutPath, /*shouldSerializeDeps*/true,
+  llvm::errs() << getFormattedTimestamp() << " buildSwiftModuleFromSwiftInterface [4] before buildSwiftModule\n";
+  auto backupFailed = backupBuilder.buildSwiftModule(OutPath, /*shouldSerializeDeps*/true,
                                         /*ModuleBuffer*/nullptr, nullptr,
                                         SearchPathOpts.CandidateCompiledModules);
+  llvm::errs() << getFormattedTimestamp() << " buildSwiftModuleFromSwiftInterface [4] after buildSwiftModule\n";
+  return backupFailed;
 }
 
 static bool readSwiftInterfaceVersionAndArgs(

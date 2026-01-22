@@ -38,10 +38,33 @@
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/LockFileManager.h"
 #include "llvm/ADT/STLExtras.h"
+#include <chrono>
+#if defined(_WIN32)
+#define _AMD64_
+#include <debugapi.h>
+#endif
 
 using namespace swift;
 using FileDependency = SerializationOptions::FileDependency;
 namespace path = llvm::sys::path;
+
+static std::string getFormattedTimestamp() {
+  auto now = std::chrono::system_clock::now();
+  auto timeT = std::chrono::system_clock::to_time_t(now);
+  auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+      now.time_since_epoch()) % 1000000;
+  std::tm tm;
+#ifdef _WIN32
+  localtime_s(&tm, &timeT);
+#else
+  localtime_r(&timeT, &tm);
+#endif
+  char buf[64];
+  snprintf(buf, sizeof(buf), "[%04d-%02d-%02d %02d:%02d:%02d.%06lld]",
+      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+      tm.tm_hour, tm.tm_min, tm.tm_sec, (long long)us.count());
+  return std::string(buf);
+}
 
 /// If the file dependency in \p FullDepPath is inside the \p Base directory,
 /// this returns its path relative to \p Base. Otherwise it returns None.
@@ -379,65 +402,76 @@ bool ImplicitModuleInterfaceBuilder::buildSwiftModule(StringRef OutPath,
                                                       std::unique_ptr<llvm::MemoryBuffer> *ModuleBuffer,
                                                       llvm::function_ref<void()> RemarkRebuild,
                                                       ArrayRef<std::string> CompiledCandidates) {
+  llvm::errs() << getFormattedTimestamp() << " ImplicitModuleInterfaceBuilder::buildSwiftModule(): OutputPath: " << OutPath << "\n";
+  #ifdef _WIN32
+  if (IsDebuggerPresent()) {
+      DebugBreak();
+  }
+  #endif
   auto build = [&]() {
     if (RemarkRebuild) {
       RemarkRebuild();
     }
-    return buildSwiftModuleInternal(OutPath, ShouldSerializeDeps,
+    llvm::errs() << getFormattedTimestamp() << " buildSwiftModuleInternal before buildSwiftModuleInternal\n";
+    auto result = buildSwiftModuleInternal(OutPath, ShouldSerializeDeps,
                                     ModuleBuffer, CompiledCandidates);
+    llvm::errs() << getFormattedTimestamp() << " buildSwiftModuleInternal after buildSwiftModuleInternal\n";
+    return result;
   };
   if (disableInterfaceFileLock) {
     return build();
   }
   while (1) {
-  // Attempt to lock the interface file. Only one process is allowed to build
-  // module from the interface so we don't consume too much memory when multiple
-  // processes are doing the same.
-  // FIXME: We should surface the module building step to the build system so
-  // we don't need to synchronize here.
-  llvm::LockFileManager Lock(OutPath);
-  bool Owned;
-  if (llvm::Error Err = Lock.tryLock().moveInto(Owned)) {
-    llvm::consumeError(std::move(Err));
-    // ModuleInterfaceBuilder takes care of correctness and locks are only
-    // necessary for performance. Fallback to building the module in case of any lock
-    // related errors.
-    if (RemarkRebuild) {
-      diagnose(diag::interface_file_lock_failure);
+    // Attempt to lock the interface file. Only one process is allowed to build
+    // module from the interface so we don't consume too much memory when multiple
+    // processes are doing the same.
+    // FIXME: We should surface the module building step to the build system so
+    // we don't need to synchronize here.
+    llvm::LockFileManager Lock(OutPath);
+    bool Owned;
+    if (llvm::Error Err = Lock.tryLock().moveInto(Owned)) {
+      llvm::consumeError(std::move(Err));
+      // ModuleInterfaceBuilder takes care of correctness and locks are only
+      // necessary for performance. Fallback to building the module in case of any lock
+      // related errors.
+      if (RemarkRebuild) {
+        diagnose(diag::interface_file_lock_failure);
+      }
+      return build();
     }
-    return build();
-  }
-  if (Owned) {
-    return build();
-  }
-  // Someone else is responsible for building the module. Wait for them to
-  // finish.
-  switch (Lock.waitForUnlockFor(std::chrono::seconds(256))) {
-  case llvm::WaitForUnlockResult::Success: {
-    // This process may have a different module output path. If the other
-    // process doesn't build the interface to this output path, we should try
-    // building ourselves.
-    auto bufferOrError = llvm::MemoryBuffer::getFile(OutPath);
-    if (!bufferOrError)
-      continue;
-    if (ModuleBuffer)
-      *ModuleBuffer = std::move(bufferOrError.get());
-    return false;
-  }
-  case llvm::WaitForUnlockResult::OwnerDied: {
-    continue; // try again to get the lock.
-  }
-  case llvm::WaitForUnlockResult::Timeout: {
-    // Since ModuleInterfaceBuilder takes care of correctness, we try waiting for
-    // another process to complete the build so swift does not do it done
-    // twice. If case of timeout, build it ourselves.
-    if (RemarkRebuild) {
-      diagnose(diag::interface_file_lock_timed_out, interfacePath);
+    if (Owned) {
+      return build();
     }
-    // Clear the lock file so that future invocations can make progress.
-    Lock.unsafeMaybeUnlock();
-    continue;
-  }
-  }
+    // Someone else is responsible for building the module. Wait for them to
+    // finish.
+    switch (Lock.waitForUnlockFor(std::chrono::seconds(256))) {
+      case llvm::WaitForUnlockResult::Success: {
+        // This process may have a different module output path. If the other
+        // process doesn't build the interface to this output path, we should try
+        // building ourselves.
+        llvm::errs() << getFormattedTimestamp() << " buildSwiftModule before getFile\n";
+        auto bufferOrError = llvm::MemoryBuffer::getFile(OutPath);
+        llvm::errs() << getFormattedTimestamp() << " buildSwiftModule after getFile\n";
+        if (!bufferOrError)
+          continue;
+        if (ModuleBuffer)
+          *ModuleBuffer = std::move(bufferOrError.get());
+        return false;
+      }
+      case llvm::WaitForUnlockResult::OwnerDied: {
+        continue; // try again to get the lock.
+      }
+      case llvm::WaitForUnlockResult::Timeout: {
+        // Since ModuleInterfaceBuilder takes care of correctness, we try waiting for
+        // another process to complete the build so swift does not do it done
+        // twice. If case of timeout, build it ourselves.
+        if (RemarkRebuild) {
+          diagnose(diag::interface_file_lock_timed_out, interfacePath);
+        }
+        // Clear the lock file so that future invocations can make progress.
+        Lock.unsafeMaybeUnlock();
+        continue;
+      }
+    }
   }
 }
